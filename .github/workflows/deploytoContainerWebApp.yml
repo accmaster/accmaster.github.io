@@ -1,0 +1,61 @@
+on: [push]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - name: 'Checkout Github Action' 
+      uses: actions/checkout@master
+    
+    - name: 'Login via Azure CLI'
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Create ACR
+      id: create-acr
+      run: |
+        az acr create -n dloan -g DefaultResourceGroup-EUS --location "East US" --sku Standard --admin-enabled
+        echo "::set-output name=acr_username::`az acr credential show -n dloan --query username | xargs`"
+        echo "::set-output name=acr_password::`az acr credential show -n dloan --query passwords[0].value | xargs`"
+        echo "::add-mask::`az acr credential show -n dloan --query passwords[0].value | xargs`"
+    
+    - uses: azure/docker-login@v1
+      with:
+        login-server: dloan.azurecr.io
+        username: ${{ steps.create-acr.outputs.acr_username }}
+        password: ${{ steps.create-acr.outputs.acr_password }}
+    
+    - name: Build and push image to ACR
+      id: build-image
+      run: |
+        docker build "$GITHUB_WORKSPACE/docker pull wordpress:php8.0-fpm-alpine" -f  "w" -t dloan.azurecr.io/dloan-img:${{ github.sha }}
+        docker push dloan.azurecr.io/dloan-img:${{ github.sha }}
+      
+    - name: Set Web App ACR authentication
+      uses: Azure/appservice-settings@v1
+      with: 
+        app-name: dloan
+        app-settings-json: | 
+          [
+            {
+              "name": "DOCKER_REGISTRY_SERVER_URL",
+              "value": "dloan.azurecr.io",
+              "slotSetting": false
+            },
+            {
+              "name": "DOCKER_REGISTRY_SERVER_USERNAME",
+              "value": "${{ steps.create-acr.outputs.acr_username }}",
+              "slotSetting": false
+            },
+            {
+              "name": "DOCKER_REGISTRY_SERVER_PASSWORD",
+              "value": "${{ steps.create-acr.outputs.acr_password }}",
+              "slotSetting": false
+            }
+          ]
+        
+    - uses: azure/webapps-deploy@v2
+      with:
+        app-name: dloan
+        images: dloan.azurecr.io/dloan-img:${{ github.sha }}
